@@ -1,4 +1,5 @@
 import joblib
+import pickle
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
@@ -10,31 +11,36 @@ from typing import List
 # ---------------------------------------------------------
 app = FastAPI(
     title="PCOS Diagnostic API",
-    description="Backend API for predicting PCOS based on 43 clinical features.",
-    version="1.0.0"
+    description="Backend API for predicting PCOS based on 9 clinical features.",
+    version="1.1.0"
 )
 
-# Global variables for the model and scaler
-MODEL_PATH = "pcos_random_forest.pkl"
-SCALER_PATH = "pcos_scaler.pkl"
+# Global variables for the model and scaler (Updated to match your filenames)
+MODEL_PATH = "pcos_model.pkl"
+SCALER_PATH = "scaler.pkl"
 
 try:
-    # We load these globally so they stay in memory (warm start)
-    model = joblib.load(MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    # Check how many features the model expects based on the scaler
+    # Using pickle.load as we saved with pickle in the previous step
+    with open(MODEL_PATH, 'rb') as f:
+        model = pickle.load(f)
+    with open(SCALER_PATH, 'rb') as f:
+        scaler = pickle.load(f)
+        
+    # Dynamically detect how many features the model expects
     EXPECTED_FEATURES = scaler.n_features_in_
+    print(f"Model loaded. Expecting {EXPECTED_FEATURES} features.")
 except Exception as e:
     print(f"Error loading model files: {e}")
     model = None
     scaler = None
-    EXPECTED_FEATURES = 43 # Default fallback
+    EXPECTED_FEATURES = 9 # Fallback for your simplified dataset
 
 # ---------------------------------------------------------
 # 2. DATA MODELS (SCHEMA)
 # ---------------------------------------------------------
 class PatientData(BaseModel):
-    # This expects a JSON like: {"features": [28, 24.5, ... 43 times]}
+    # This expects a JSON like: 
+    # {"features": [30, 70.5, 165, 25.8, 12.0, 0, 0, 1, 1]}
     features: List[float]
 
 # ---------------------------------------------------------
@@ -45,15 +51,23 @@ class PatientData(BaseModel):
 def health_check():
     """Confirms the API is alive and the model is loaded."""
     if model and scaler:
-        return {"status": "online", "model_loaded": True, "expected_features": EXPECTED_FEATURES}
+        return {
+            "status": "online", 
+            "model_loaded": True, 
+            "expected_features": EXPECTED_FEATURES,
+            "feature_order": ["Age", "Weight", "Height", "BMI", "Hb", "WeightGain", "HairLoss", "Pimples", "Exercise"]
+        }
     return {"status": "error", "message": "Model files missing on server"}
 
 @app.post("/predict")
 def predict_pcos(patient: PatientData):
     """
-    Receives 43 features, scales them, and returns PCOS prediction.
+    Receives clinical features, scales them, and returns PCOS prediction.
     """
-    # Validation: Ensure exactly the right amount of data is sent
+    if not model or not scaler:
+        raise HTTPException(status_code=503, detail="Model not initialized on server.")
+
+    # Validation: Ensure exactly the right amount of data is sent (9 features)
     if len(patient.features) != EXPECTED_FEATURES:
         raise HTTPException(
             status_code=400, 
@@ -61,23 +75,24 @@ def predict_pcos(patient: PatientData):
         )
 
     try:
-        # Convert to numpy and reshape for a single prediction
+        # 1. Convert to numpy and reshape for a single prediction
         input_data = np.array(patient.features).reshape(1, -1)
         
-        # Apply the SAME scaling used during training
+        # 2. Apply the SAME scaling used during training
         scaled_data = scaler.transform(input_data)
         
-        # Get prediction (0 or 1)
-        prediction = model.predict(scaled_data)[0]
+        # 3. Get prediction (0 or 1)
+        prediction = int(model.predict(scaled_data)[0])
         
-        # Get probability (Confidence)
+        # 4. Get probability (Confidence)
         probabilities = model.predict_proba(scaled_data)[0]
         confidence = float(np.max(probabilities) * 100)
         
         return {
             "pcos_detected": bool(prediction),
             "confidence_percentage": round(confidence, 2),
-            "interpretation": "Positive" if prediction == 1 else "Negative"
+            "interpretation": "Positive" if prediction == 1 else "Negative",
+            "recommendation": "Consult a doctor for further clinical validation." if prediction == 1 else "Results suggest low risk."
         }
     
     except Exception as e:
@@ -85,4 +100,5 @@ def predict_pcos(patient: PatientData):
 
 if __name__ == "__main__":
     import uvicorn
+    # To run this: save as main.py and run 'uvicorn main:app --reload'
     uvicorn.run(app)
